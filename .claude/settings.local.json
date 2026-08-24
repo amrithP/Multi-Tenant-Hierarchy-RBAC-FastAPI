@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install *)",
+      "Bash(node build_plan.js)",
+      "Bash(python3 -c \"import pandas; print\\(pandas.__version__\\)\")"
+    ]
+  }
+}
