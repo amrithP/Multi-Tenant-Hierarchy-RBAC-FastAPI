@@ -5,16 +5,17 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 
 from app.core.config import (
-    MYSQL_DATABASE,
-    MYSQL_HOST,
-    MYSQL_PASSWORD,
-    MYSQL_PORT,
-    MYSQL_USER,
+DB_USER,
+DB_PASSWORD,
+DB_HOST,
+DB_PORT,
+DB_NAME
+
 )
 
-encoded_password = quote_plus(MYSQL_PASSWORD)
+encoded_password = quote_plus(DB_PASSWORD)
 DATABASE_URL = (
-    f"mysql+pymysql://{MYSQL_USER}:{encoded_password}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DATABASE}"
+    f"postgresql+psycopg2://{DB_USER}:{encoded_password}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 )
 
 engine = create_engine(DATABASE_URL,

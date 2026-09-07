@@ -9,6 +9,8 @@ from app.schemas.pagination import Page
 from app.schemas.user import PasswordChange, UserCreate, UserOut, UserUpdate
 from typing import Optional
 from sqlalchemy import or_
+from app.core.email import send_password_changed_email
+from app.core.exceptions import InsufficientPermissionError
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -182,13 +184,21 @@ def change_password(
         raise HTTPException(status_code=404, detail="User not found")
 
     if current_user["username"] != user.username and current_user["role"] != OWNER:
-        raise HTTPException(status_code=403, detail="Not enough permission")
+        raise InsufficientPermissionError("not enough permission for changing the password.")
 
     if not verify_password(payload.current_password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Current password is incorrect")
 
     user.hashed_password = hash_password(payload.new_password)
+    user.refresh_token = None    #session unvalidating step
+    user.refresh_token_expires = None
     db.commit()
+
+    try:
+        send_password_changed_email(user.email, user.username)
+    except Exception:
+        pass
+
     return {"message": "Password updated successfully"}
 
 @router.get("", response_model=Page[UserOut])

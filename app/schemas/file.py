@@ -23,3 +23,26 @@ class FileOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+
+#multiple files upload at once 
+class FileUploadResult(BaseModel):
+    filename: str
+    success: bool
+    file_id: Optional[int] = None
+    error: Optional[str] = None
+
+
+class MultiUploadResponse(BaseModel):
+    total_files: int
+    successful: int
+    failed: int
+    results: List[FileUploadResult]
+
+
+
+class UploadFileCount(BaseModel):
+    uploaded_by:int
+    username:str
+    file_count:int

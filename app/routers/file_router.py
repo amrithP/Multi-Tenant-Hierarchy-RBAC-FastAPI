@@ -10,10 +10,13 @@ from app.core.permissions import MANAGER, OWNER, require_roles
 from app.core.security import get_current_user
 from app.db.database import get_db
 from app.models import File, User
-from app.schemas.file import FileOut
+from app.schemas.file import FileOut,UploadFileCount
 from app.schemas.file_share import UpdateSharesRequest,SharedWithEntry
 from app.schemas.pagination import Page
-
+from app.core.exceptions import InsufficientPermissionError,FileTooLarge
+from app.schemas.file import FileUploadResult,MultiUploadResponse  #only did schema changes for multiple files upload at once
+from typing import List
+from sqlalchemy import func
 
 router = APIRouter(prefix="/files", tags=["files"])
 
@@ -61,14 +64,14 @@ def upload_file(
 
 #from ram/ disk(temporory) , it is being sent to the uploads folder (permanent save ) 1mb at a time(chunks).when u click swagger , the file gets sent to ram/disk 
     size_bytes = 0
-    with open(storage_path, "wb") as buffer:
-        while chunk := upload.file.read(1024 * 1024):
+    with open(storage_path, "wb") as buffer: #with open is also synchronous 
+        while chunk := upload.file.read(1024 * 1024): #reads 1mb at atime and stores in chunck and hits await which turns the attention to other requests simultaneously
             size_bytes += len(chunk)
             if size_bytes > MAX_UPLOAD_SIZE_BYTES:
                 buffer.close()
                 os.remove(storage_path)
-                raise HTTPException(status_code=413, detail=f"File exceeds {MAX_UPLOAD_SIZE_MB}MB limit")
-            buffer.write(chunk)
+                raise FileTooLarge(f"File exceeds {MAX_UPLOAD_SIZE_MB}MB limit")
+            buffer.write(chunk) # this is synchronous
 
     new_file = File(
         filename=upload.filename,
@@ -83,6 +86,93 @@ def upload_file(
     db.commit()
     db.refresh(new_file)
     return new_file
+
+#upload mutiple files at once. What if 50 users uploaded multiple files at the same time , thread pool concept is applied
+@router.post("/upload-multiple", response_model=MultiUploadResponse)
+def upload_multiple_files(
+    uploads: List[UploadFile] = FastAPIFile(...),
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(require_roles([OWNER, MANAGER])),
+):
+    if len(uploads) > 10:
+        raise HTTPException(status_code=400, detail="Too many files. Maximum 10 files allowed.")
+
+    results = []
+          #here , dont raise exception for a single file that is out of allowed extensions.Because there are also other files being uploaded
+    for upload in uploads:
+        ext = os.path.splitext(upload.filename)[1].lower()
+        if ext not in ALLOWED_EXTENSIONS:
+            results.append(FileUploadResult(filename=upload.filename, success=False, error="Only .csv, .xlsx, .xls files are allowed"))
+            continue
+
+        org_folder = os.path.join(UPLOAD_ROOT, str(current_user["org_id"]))
+        os.makedirs(org_folder, exist_ok=True)
+
+        stored_name = f"{uuid.uuid4()}_{upload.filename}"
+        storage_path = os.path.join(org_folder, stored_name)
+
+        size_bytes = 0
+        try:
+            with open(storage_path, "wb") as buffer:
+                while chunk := upload.file.read(1024 * 1024):
+                    size_bytes += len(chunk)
+                    if size_bytes > MAX_UPLOAD_SIZE_BYTES:
+                        raise FileTooLarge(f"File exceeds {MAX_UPLOAD_SIZE_MB}MB limit")
+                    buffer.write(chunk)
+        except FileTooLarge as e:
+            os.remove(storage_path)   #delete the half stored from the uploads folder itself
+            results.append(FileUploadResult(filename=upload.filename, success=False, error=e.message))
+            continue
+
+        new_file = File(
+            filename=upload.filename,
+            storage_path=storage_path,
+            content_type=upload.content_type,
+            size=size_bytes,
+            organization_id=current_user["org_id"],
+            uploaded_by=current_user["user_id"],
+            shared_with=[],
+        )
+        db.add(new_file)
+        db.commit()
+        db.refresh(new_file)
+        results.append(FileUploadResult(filename=upload.filename, success=True, file_id=new_file.id))
+
+    successful = [r for r in results if r.success]
+    failed = [r for r in results if not r.success]
+
+    return MultiUploadResponse(
+        total_files=len(uploads),
+        successful=len(successful),
+        failed=len(failed),
+        results=results,
+    )
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 @router.get("", response_model=Page[FileOut])
@@ -146,7 +236,7 @@ def delete_file(
     if not file:
         raise HTTPException(status_code=404, detail="File not found")
     if not has_edit_access(current_user, file):
-        raise HTTPException(status_code=403, detail="Not enough permission")
+        raise InsufficientPermissionError("not enough permission over this file.") #custom error
 
     if os.path.exists(file.storage_path):
         os.remove(file.storage_path)
@@ -169,7 +259,7 @@ def update_shares(
         raise HTTPException(status_code=404, detail="File not found")
 
     if current_user["role"] != OWNER and file.uploaded_by != current_user["user_id"]:
-        raise HTTPException(status_code=403, detail="Not enough permission")  #owner and the user who uploaded it can share
+        raise InsufficientPermissionError("not enough permission over this file.") #owner and the user who uploaded it can share
 
     user_ids = [e.user_id for e in payload.shared_with] #takes out just numbers from user ids [4,7]
     valid_count = db.query(User).filter(
@@ -201,12 +291,57 @@ def revoke_share(
     if len(updated) == len(shared):  #if same len ,it means it is not removed
         raise HTTPException(status_code=404, detail="Share not found")
     if not OWNER or not has_edit_access(current_user,file):
-         raise HTTPException(status_code=404, detail="Not enough permission")
+         raise InsufficientPermissionError("not enough permission over this file.")
 
 
     file.shared_with = updated
     db.commit()
     return {"message": "Access revoked"}
+
+
+
+
+
+@router.get("/file-count>0",response_model=UploadFileCount)
+def get_file_count(
+        db:Session = Depends(get_db),
+        current_user: dict = Depends(get_current_user)
+        
+):
+    results=(db.query(File.uploaded_by,User.username,func.count(File.id).label("file_count")).
+             join(User, File.uploaded_by == User.id).
+             filter(File.organization_id == current_user["org_id"] ).
+             group_by(File.uploaded_by,User.username).
+             having(func.count(File.id>0))
+             
+            )
+    return[
+        {"uploaded_by":r.uploaded_by,"username":r.username,"file_count":r.file_count}
+        for r in results
+    ]
+                                   
+    
+    
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 #revoke 

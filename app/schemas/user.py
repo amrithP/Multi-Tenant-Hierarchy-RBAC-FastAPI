@@ -17,7 +17,7 @@ class UserCreate(BaseModel):
     role: str  # "Manager" or "Employee"
 
 
-class UserOut(BaseModel):
+class UserOut(BaseModel):   #this is a response model. This is must for  any api 
     id: int
     username: str
     email: Optional[EmailStr] = None
@@ -37,3 +37,20 @@ class UserUpdate(BaseModel):
 class PasswordChange(BaseModel):
     current_password: str
     new_password: str
+
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    new_password: str
+
+
+#refresh token 
+class TokenResponse(BaseModel):
+    access_token: str
+    refresh_token: str
+    token_type: str = "bearer"   
